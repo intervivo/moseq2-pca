@@ -18,6 +18,7 @@ from glob import glob
 from copy import deepcopy
 import ruamel.yaml as yaml
 from tqdm.auto import tqdm
+from functools import partial
 from dask.distributed import Client
 from dask_jobqueue import SLURMCluster
 from os.path import join, exists, abspath, expanduser
@@ -598,7 +599,7 @@ def close_dask(client, cluster, timeout):
             print('Could not shutdown dask client')
 
 
-def get_rps(frames, rps=600, normalize=True):
+def get_rps(frames, rps: int= 600, normalize: bool = True):
     """
     Get random projections of frames.
 
@@ -610,13 +611,12 @@ def get_rps(frames, rps=600, normalize=True):
     Returns:
     rproj (2D or 3D numpy array): Computed random projections with same shape as frames
     """
+    rng = np.random.default_rng(0)
 
     if frames.ndim == 3:
-        use_frames = frames.reshape(-1, np.prod(frames.shape[1:]))
-    elif frames.ndim == 2:
-        use_frames = frames
+        frames = frames.reshape(len(frames), -1)
 
-    rproj = use_frames.dot(np.random.randn(use_frames.shape[1], rps).astype('float32'))
+    rproj = frames.dot(rng.standard_normal((frames.shape[1], rps), dtype='float32'))
 
     if normalize:
         rproj = scipy.stats.zscore(scipy.stats.zscore(rproj).T)
@@ -644,43 +644,39 @@ def get_changepoints(scores, k=5, sigma=3, peak_height=.5, peak_neighbors=1,
     normed_df (numpy.array): array of values for bar plot
     """
 
-    if type(k) is not int:
-        k = int(k)
+    k = int(k)
+    peak_neighbors = int(peak_neighbors)
 
-    if type(peak_neighbors) is not int:
-        peak_neighbors = int(peak_neighbors)
-
-    normed_df = deepcopy(scores)
-    nanidx = np.isnan(normed_df)
-    normed_df[nanidx] = 0
+    nanidx = np.isnan(scores)
+    smooth_scores = np.nan_to_num(scores)
 
     if sigma is not None and sigma > 0:
-        for i in range(scores.shape[0]):
-            normed_df[i, :] = gauss_smooth(normed_df[i, :], sigma)
+        smooth = partial(gauss_smooth, sig=sigma)
+        smooth_scores = np.apply_along_axis(smooth, 1, smooth_scores)
 
-    normed_df[:, k // 2:-k // 2] = (normed_df[:, k:] - normed_df[:, :-k])**2
+    smooth_scores[:, k // 2:-k // 2] = np.square(smooth_scores[:, k:] - smooth_scores[:, :-k])
+    smooth_scores[nanidx] = np.nan
 
-    normed_df[nanidx] = np.nan
-    normed_df[:, :int(6 * sigma)] = np.nan
-    normed_df[:, -int(6 * sigma):] = np.nan
+    if sigma is not None and sigma > 0:
+        smooth_scores[:, :int(6 * sigma)] = np.nan
+        smooth_scores[:, -int(6 * sigma):] = np.nan
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
-        normed_df = np.nanmean(normed_df, axis=0)
+        smooth_scores = np.nanmean(smooth_scores, axis=0)
 
-        if baseline:
-            normed_df -= np.nanmin(normed_df)
+        if baseline: smooth_scores -= np.nanmin(smooth_scores)
 
         if timestamps is not None:
-            normed_df, _, _ = insert_nans(
-                timestamps, normed_df, fps=np.round(1 / np.mean(np.diff(timestamps))).astype('int'))
+            smooth_scores, _, _ = insert_nans(
+                timestamps, smooth_scores, fps=np.round(1 / np.median(np.diff(timestamps))).astype('int'))
 
-        normed_df = np.squeeze(normed_df)
+        smooth_scores = np.squeeze(smooth_scores)
         cps = scipy.signal.argrelextrema(
-            normed_df, np.greater, order=peak_neighbors)[0]
-        cps = cps[np.argwhere(normed_df[cps] > peak_height)]
+            smooth_scores, np.greater, order=peak_neighbors)[0]
+        cps = cps[np.argwhere(smooth_scores[cps] > peak_height)]
 
-    return cps, normed_df
+    return cps, smooth_scores
 
 
 def combine_new_config(config_file, config_data):

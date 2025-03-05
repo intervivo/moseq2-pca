@@ -84,7 +84,6 @@ def load_pcs_for_cp(pca_file, config_data):
         'sigma': config_data['sigma'],
         'peak_height': config_data['threshold'],
         'peak_neighbors': config_data['neighbors'],
-        'rps': config_data['dims']
     }
 
     return pca_components, changepoint_params, missing_data, mask_params
